@@ -9,7 +9,7 @@
 ### 🐛 Bug fixes
 
 - [iOS] Fixed `defaultLaunchURL` being ignored on cold start when no recently-opened app was cached. ([#46185](https://github.com/expo/expo/pull/46185) by [@kaihirota](https://github.com/kaihirota))
-- [iOS] Cleared the deep-link URL from cached `launchOptions` after it is consumed ([#XXXX](https://github.com/expo/expo/pull/XXXX) by [@gabrieldonadel](https://github.com/gabrieldonadel))
+- [iOS] Cleared the deep-link URL from cached `launchOptions` after it is consumed ([#46265](https://github.com/expo/expo/pull/46265) by [@gabrieldonadel](https://github.com/gabrieldonadel))
 
 ### 💡 Others
 
