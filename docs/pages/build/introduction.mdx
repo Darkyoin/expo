@@ -1,161 +1,512 @@
----
-title: EAS Build
-sidebar_title: Introduction
-description: EAS Build is a hosted service for building app binaries for your Expo and React Native projects.
----
+import { useState, useMemo, useEffect, useRef, useCallback } from "react";
+import {
+  View, Text, ScrollView, TouchableOpacity, TextInput,
+  Modal, StyleSheet, Dimensions, StatusBar, Platform, Animated
+} from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+const { width: SW } = Dimensions.get("window");
+import Svg, { G, Path, Circle } from "react-native-svg";
 
-import { Cube01Icon } from '@expo/styleguide-icons/outline/Cube01Icon';
+// ── Palette ────────────────────────────────────────────────────────────────────
+const C = {
+  bg: "#0f1117", card: "#181c26", cardAlt: "#1e2334", border: "#2a3048",
+  accent: "#4ade80", blue: "#60a5fa", red: "#f87171", yellow: "#fbbf24",
+  purple: "#a78bfa", text: "#f1f5f9", muted: "#64748b", mutedLight: "#94a3b8",
+  orange: "#fb923c", amber: "#f59e0b", fire: "#ef4444",
+  gold: "#FFD700", cyan: "#22d3ee",
+};
 
-import { BoxLink } from '~/ui/components/BoxLink';
-import { Collapsible } from '~/ui/components/Collapsible';
-import { NoIcon, YesIcon } from '~/ui/components/DocIcons';
-import { FAQ } from '~/ui/components/FAQ';
-import { Terminal } from '~/ui/components/Snippet';
+const fmt = (n) =>
+  Number(n).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-**EAS Build** is a hosted Expo Application Services (EAS) service that builds app binaries (also called [standalone apps](/more/glossary-of-terms/#standalone-app)) for your Expo and React Native projects.
+const todayStr = () => new Date().toISOString().slice(0, 10);
 
-EAS Build makes building your apps for distribution simple and easy to automate by providing defaults that work well for Expo and React Native projects out of the box, and by handling your app signing credentials for you (if you wish). It also makes sharing builds with your team easier than ever with [internal distribution](/build/internal-distribution/) (using [ad hoc](/build/internal-distribution/) and/or enterprise "universal" provisioning), deeply integrates with EAS Submit for app store submissions, and has first-class support for the [`expo-updates`](/build/updates/) library.
+const DEFAULT_ACCOUNTS = [
+  { id: "kplus", label: "K Plus", emoji: "🏦", color: C.blue },
+  { id: "make",  label: "Make",   emoji: "☁️", color: C.purple },
+  { id: "cash",  label: "Cash",   emoji: "💵", color: C.yellow },
+  { id: "grab",  label: "Grab",   emoji: "🏍️", color: C.accent },
+];
 
-EAS Build is also designed to work for any native project, whether or not you use Expo and React Native. It's the fastest way to get from `npx create-expo-app` or `npx @react-native-community/cli@latest init` to app stores.
+const DEFAULT_CATS = {
+  expense: [
+    { id: "food",          label: "อาหาร",          emoji: "🍱" },
+    { id: "transport",     label: "เดินทาง",         emoji: "🚗" },
+    { id: "shopping",      label: "ช้อปปิ้ง",        emoji: "🛍️" },
+    { id: "health",        label: "สุขภาพ",          emoji: "🏥" },
+    { id: "entertainment", label: "บันเทิง",         emoji: "🎮" },
+    { id: "utilities",     label: "ค่าสาธารณูปโภค",  emoji: "💡" },
+    { id: "other_exp",     label: "อื่นๆ",            emoji: "📦" },
+  ],
+  income: [
+    { id: "salary",    label: "เงินเดือน", emoji: "💼" },
+    { id: "freelance", label: "ฟรีแลนซ์", emoji: "💻" },
+    { id: "bonus",     label: "โบนัส",    emoji: "🎁" },
+    { id: "invest",    label: "การลงทุน", emoji: "📈" },
+    { id: "other_inc", label: "อื่นๆ",     emoji: "💰" },
+  ],
+};
 
-## Quick start
+const ACCOUNT_COLORS = [C.blue, C.purple, C.yellow, C.accent, C.red, "#fb923c", "#e879f9", "#34d399", "#f472b6"];
+const THAI_MONTHS = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
+const THAI_DAYS_SHORT = ["จ","อ","พ","พฤ","ศ","ส","อา"];
 
-> **info** The `eas` commands below require EAS CLI. See [How to install EAS CLI](/eas/cli/#installation) for more information.
+const formatDateDisplay = (dateStr) => {
+  const d = new Date(dateStr + "T00:00:00");
+  const today = todayStr();
+  const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+  const yStr = yesterday.toISOString().slice(0, 10);
+  if (dateStr === today) return "วันนี้";
+  if (dateStr === yStr) return "เมื่อวาน";
+  return d.toLocaleDateString("th-TH", { weekday: "short", year: "numeric", month: "short", day: "numeric" });
+};
 
-To build your app, run the following command:
+// ── Helpers ────────────────────────────────────────────────────────────────────
+const getMonthDays = (year, month) => new Date(year, month + 1, 0).getDate();
+const getFirstDayOfWeek = (year, month) => {
+  const d = new Date(year, month, 1).getDay();
+  return d === 0 ? 6 : d - 1;
+};
+const dateStr = (year, month, day) =>
+  `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 
-<Terminal cmd={['$ eas build --platform all']} />
+const countWorkingDays = (startDateStr, endDateStr, holidays = []) => {
+  let count = 0;
+  const start = new Date(startDateStr + "T00:00:00");
+  const end   = new Date(endDateStr   + "T00:00:00");
+  const holidaySet = new Set(holidays);
+  const cur = new Date(start);
+  while (cur <= end) {
+    const ds = cur.toISOString().slice(0, 10);
+    if (!holidaySet.has(ds)) count++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return count;
+};
 
-This command sends your project to EAS Build and produces installable binaries for Android and iOS. You can also build for one platform at a time by passing in `--platform android` or `--platform ios` as desired. For complete setup instructions, see [Create your first build](/build/setup/).
+const computeNetBetween = (txs, fromDate, toDate) => {
+  let net = 0;
+  txs.forEach((t) => {
+    if (t.date < fromDate || t.date > toDate) return;
+    if (t.kind === "income") net += t.amount;
+    else if (t.kind === "expense") net -= t.amount;
+  });
+  return net;
+};
 
-## Key features
+// ── Accordion Section ──────────────────────────────────────────────────────────
+function AccordionSection({ title, icon, children, isOpen, onToggle, accentColor = C.accent }) {
+  const anim = useRef(new Animated.Value(isOpen ? 1 : 0)).current;
+  useEffect(() => {
+    Animated.spring(anim, { toValue: isOpen ? 1 : 0, useNativeDriver: true, friction: 8, tension: 60 }).start();
+  }, [isOpen]);
+  const rotate = anim.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "180deg"] });
+  return (
+    <View style={{ marginBottom: 12 }}>
+      <TouchableOpacity onPress={onToggle} activeOpacity={0.8}
+        style={{ backgroundColor: C.card, borderRadius: isOpen ? 14 : 14, padding: 16, borderWidth: 1, borderColor: isOpen ? accentColor + "55" : C.border, flexDirection: "row", alignItems: "center" }}>
+        <Text style={{ fontSize: 18, marginRight: 10 }}>{icon}</Text>
+        <Text style={{ color: C.text, fontWeight: "700", fontSize: 14, flex: 1 }}>{title}</Text>
+        <Animated.Text style={{ color: C.muted, fontSize: 14, transform: [{ rotate }] }}>▾</Animated.Text>
+      </TouchableOpacity>
+      {isOpen && (
+        <View style={{ backgroundColor: C.card, borderWidth: 1, borderTopWidth: 0, borderColor: accentColor + "33", borderBottomLeftRadius: 14, borderBottomRightRadius: 14, padding: 16 }}>
+          {children}
+        </View>
+      )}
+    </View>
+  );
+}
 
-- Cloud builds for Android and iOS with consistent environments
-- Automatically provision and manage app signing credentials or use your own
-- Share [internal distribution](/build/internal-distribution/) builds with a URL
-- Automate builds with [build profiles](/build/eas-json/#build-profiles) in **eas.json** (named sets of build settings) and integrations with [EAS Workflows](/eas/workflows/get-started/) or [CI pipelines](/build/building-on-ci/)
-- Auto-submit successful builds to app stores via [`--auto-submit`](/build/automate-submissions/) and EAS Submit
-- First-class [`expo-updates` integration](/build/updates/) with per-profile channels and [runtime version](/eas-update/runtime-versions/) guidance
-- Reuse [development builds](/develop/development-builds/introduction/) across your team. When two team members run `eas build:dev` and the project fingerprint matches, the existing build is downloaded from EAS instead of creating a new one
-- Faster builds via [dependency caching and custom cache paths](/build-reference/caching/)
-- Install builds and updates on devices with [Expo Orbit](https://expo.dev/orbit)
+function Divider() {
+  return <View style={{ height: 1, backgroundColor: C.border, marginVertical: 4 }} />;
+}
 
-## When to use EAS Build
+function SaveBtn({ onPress, label = "บันทึกรายการ", color = C.accent, dirty = false }) {
+  return (
+    <TouchableOpacity onPress={dirty ? onPress : undefined}
+      style={{ backgroundColor: dirty ? color : C.border, borderRadius: 12, paddingVertical: 13, alignItems: "center", marginTop: 14, opacity: dirty ? 1 : 0.45 }}>
+      <Text style={{ color: dirty ? "#0f1117" : C.muted, fontWeight: "800", fontSize: 14 }}>
+        {dirty ? `✓ ${label}` : `${label} (ไม่มีการเปลี่ยนแปลง)`}
+      </Text>
+    </TouchableOpacity>
+  );
+}
 
-| Scenario                                                                             | Recommendation |
-| ------------------------------------------------------------------------------------ | -------------- |
-| Build production-ready binaries for app stores                                       | <YesIcon />    |
-| Share builds with testers via [internal distribution](/build/internal-distribution/) | <YesIcon />    |
-| Consistent builds across team members without local environment setup                | <YesIcon />    |
-| Automate builds from CI or [EAS Workflows](/eas/workflows/get-started/)              | <YesIcon />    |
-| Managed app signing credentials                                                      | <YesIcon />    |
-| Debugging native code locally                                                        | <NoIcon />     |
+// ── Donut Pie Chart ────────────────────────────────────────────────────────────
+// Converts degrees to radians
+const toRad = (deg) => (deg * Math.PI) / 180;
 
-## Frequently asked questions
+// Returns a point on a circle given center, radius and angle (0° = top)
+const polarXY = (cx, cy, r, deg) => ({
+  x: +(cx + r * Math.cos(toRad(deg - 90))).toFixed(5),
+  y: +(cy + r * Math.sin(toRad(deg - 90))).toFixed(5),
+});
 
-<FAQ>
+/**
+ * Builds an SVG path string for a donut slice.
+ *
+ * CRITICAL FIX: When a single slice represents 100% of the total, sweepDeg
+ * would be 360°. An SVG arc from point A back to point A is degenerate and
+ * renders nothing (or crashes). We handle this by splitting the full circle
+ * into two 179.9999° arcs that together close the ring correctly.
+ */
+const donutSlicePath = (cx, cy, outerR, innerR, startDeg, sweepDeg) => {
+  const sweep = Math.abs(sweepDeg);
 
-<Collapsible summary="How do I share builds with my team before submitting to app stores?">
+  // Full-circle case: split into two half-arcs to avoid SVG degenerate arc
+  if (sweep >= 359.9999) {
+    const half = 179.9999;
+    // First half-arc (outer: top → bottom, inner: bottom → top)
+    const o1 = polarXY(cx, cy, outerR, startDeg);
+    const o2 = polarXY(cx, cy, outerR, startDeg + half);
+    const i1 = polarXY(cx, cy, innerR, startDeg + half);
+    const i2 = polarXY(cx, cy, innerR, startDeg);
+    // Second half-arc
+    const o3 = polarXY(cx, cy, outerR, startDeg + half);
+    const o4 = polarXY(cx, cy, outerR, startDeg + sweep);
+    const i3 = polarXY(cx, cy, innerR, startDeg + sweep);
+    const i4 = polarXY(cx, cy, innerR, startDeg + half);
 
-Use [internal distribution](/build/internal-distribution/) to share builds with a URL. Set `"distribution": "internal"` in your [build profile](/build/eas-json/#build-profiles) in **eas.json** to generate installable Android Package (APK) files for Android or [ad hoc builds](/build/internal-distribution/) for iOS.
+    return [
+      // First arc
+      `M ${o1.x} ${o1.y}`,
+      `A ${outerR} ${outerR} 0 0 1 ${o2.x} ${o2.y}`,
+      `L ${i1.x} ${i1.y}`,
+      `A ${innerR} ${innerR} 0 0 0 ${i2.x} ${i2.y}`,
+      "Z",
+      // Second arc
+      `M ${o3.x} ${o3.y}`,
+      `A ${outerR} ${outerR} 0 0 1 ${o4.x} ${o4.y}`,
+      `L ${i3.x} ${i3.y}`,
+      `A ${innerR} ${innerR} 0 0 0 ${i4.x} ${i4.y}`,
+      "Z",
+    ].join(" ");
+  }
 
-</Collapsible>
+  // Normal partial arc
+  const clampedSweep = Math.min(sweep, 359.9998);
+  const endDeg   = startDeg + clampedSweep;
+  const largeArc = clampedSweep > 180 ? 1 : 0;
 
-<Collapsible summary="Can I use EAS Build with existing React Native projects?">
+  const o1 = polarXY(cx, cy, outerR, startDeg);
+  const o2 = polarXY(cx, cy, outerR, endDeg);
+  const i1 = polarXY(cx, cy, innerR, endDeg);
+  const i2 = polarXY(cx, cy, innerR, startDeg);
 
-Yes. EAS Build works with existing React Native projects created with `npx react-native init` or similar tools. See [Overview of using Expo with existing React Native apps](/bare/overview/) for more information.
+  return [
+    `M ${o1.x} ${o1.y}`,
+    `A ${outerR} ${outerR} 0 ${largeArc} 1 ${o2.x} ${o2.y}`,
+    `L ${i1.x} ${i1.y}`,
+    `A ${innerR} ${innerR} 0 ${largeArc} 0 ${i2.x} ${i2.y}`,
+    "Z",
+  ].join(" ");
+};
 
-</Collapsible>
+function DonutChart({ slices, size = 200 }) {
+  // Filter out zero-value slices — they cause degenerate 0° arcs
+  const validSlices = (slices || []).filter((s) => s.value > 0);
 
-<Collapsible summary="Does EAS Build handle app signing credentials?">
+  if (!validSlices.length) {
+    return (
+      <View style={{ height: 160, alignItems: "center", justifyContent: "center" }}>
+        <Text style={{ color: C.muted, fontSize: 13 }}>ไม่มีข้อมูล</Text>
+      </View>
+    );
+  }
 
-Yes. EAS Build can generate and manage Android [keystores](/app-signing/app-credentials/#android), iOS [provisioning profiles](/app-signing/app-credentials/#ios) and [distribution certificates](/app-signing/app-credentials/#ios), or use credentials you provide. See [App signing credentials](/app-signing/app-credentials/) for more information.
+  const total  = validSlices.reduce((s, x) => s + x.value, 0);
+  const cx     = size / 2;
+  const cy     = size / 2;
+  const outerR = size / 2 - 6;
+  const innerR = outerR * 0.54;
 
-</Collapsible>
+  // Use a small gap between slices only when more than one slice exists
+  const GAP_DEG = validSlices.length > 1 ? 1.2 : 0;
 
-<Collapsible summary="Can I run builds locally instead of in the cloud?">
+  // Build cumulative slice geometry
+  let cursor = 0;
+  const computed = validSlices.map((sl) => {
+    const pct   = sl.value / total;
+    const sweep = pct * 360;
+    const start = cursor;
+    cursor += sweep;
+    return { ...sl, pct, sweep, startDeg: start };
+  });
 
-Yes. Use [local builds](/build-reference/local-builds/) with `eas build --local` to run builds on your machine. This is useful for debugging or for security policies that require local builds.
+  return (
+    <View style={{ alignItems: "center" }}>
+      {/* ── SVG Donut ── */}
+      <View style={{ width: size, height: size }}>
+        <Svg width={size} height={size}>
+          {/* Track ring — background circle */}
+          <Circle
+            cx={cx}
+            cy={cy}
+            r={(outerR + innerR) / 2}
+            fill="none"
+            stroke={C.border}
+            strokeWidth={outerR - innerR}
+          />
 
-</Collapsible>
+          {/* Slices */}
+          <G>
+            {computed.map((sl, i) => {
+              // Apply gap by shrinking sweep and offsetting start
+              const gapHalf = GAP_DEG / 2;
+              const start   = sl.startDeg + gapHalf;
+              const sweep   = sl.sweep - GAP_DEG;
 
-<Collapsible summary="Can I use EAS Build with EAS Workflows or CI pipelines?">
+              // Skip slivers that collapsed to nothing after gap removal
+              if (sweep <= 0) return null;
 
-Yes. EAS Build integrates with [EAS Workflows](/eas/workflows/get-started/) using the `build` job type. Add a build job to your workflow configuration, for example:
+              return (
+                <Path
+                  key={i}
+                  d={donutSlicePath(cx, cy, outerR, innerR, start, sweep)}
+                  fill={sl.color}
+                />
+              );
+            })}
+          </G>
+        </Svg>
 
-```yaml
-jobs:
-  build_ios:
-    type: build
-    params:
-      platform: ios
-```
+        {/* Center hole label — RN View layered over SVG */}
+        <View
+          pointerEvents="none"
+          style={{
+            position: "absolute",
+            width:  innerR * 2,
+            height: innerR * 2,
+            borderRadius: innerR,
+            backgroundColor: C.card,
+            top:  cy - innerR,
+            left: cx - innerR,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Text style={{ color: C.muted, fontSize: 10 }}>รวม</Text>
+          <Text style={{ color: C.text, fontWeight: "800", fontSize: 13 }}>
+            ฿{fmt(total)}
+          </Text>
+        </View>
+      </View>
 
-The build job supports builds for both platforms or conditional builds based on the branch:
+      {/* ── Legend list ── */}
+      <View style={{ marginTop: 16, width: "100%" }}>
+        {validSlices.map((sl, i) => (
+          <View
+            key={i}
+            style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6 }}
+          >
+            <View
+              style={{ width: 12, height: 12, borderRadius: 3, backgroundColor: sl.color }}
+            />
+            <Text
+              style={{ color: C.mutedLight, fontSize: 12, flex: 1 }}
+              numberOfLines={1}
+            >
+              {sl.label}
+            </Text>
+            <Text style={{ color: C.text, fontSize: 12, fontWeight: "600" }}>
+              ฿{fmt(sl.value)}
+            </Text>
+            <Text style={{ color: C.muted, fontSize: 11, width: 36, textAlign: "right" }}>
+              {Math.round((sl.value / total) * 100)}%
+            </Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
 
-```yaml
-jobs:
-  build:
-    type: build
-    params:
-      platform: all
-      profile: ${{ github.ref_name == 'main' && 'production' || 'preview' }}
-```
+// ── Ring Progress Chart ────────────────────────────────────────────────────────
+function RingProgress({ pct, size = 120, color = C.orange, children }) {
+  const strokeWidth = size * 0.12;
+  const radius = (size - strokeWidth) / 2;
+  const cx = size / 2;
+  const cy = size / 2;
+  const circumference = 2 * Math.PI * radius;
 
-For more information and other usage examples, see the [EAS Workflows build job](/eas/workflows/pre-packaged-jobs#build).
+  const clampedPct = Math.min(Math.max(pct, 0), 100);
+  const strokeDashoffset = circumference - (clampedPct / 100) * circumference;
 
-EAS Build supports [builds from GitHub](/build/building-from-github/) and [building on CI](/build/building-on-ci/) with any provider.
+  const overPct = Math.min(Math.max(pct - 100, 0), 100);
+  const overDashoffset = circumference - (overPct / 100) * circumference;
 
-</Collapsible>
+  const over2Pct = Math.min(Math.max(pct - 200, 0), 100);
+  const over2Dashoffset = circumference - (over2Pct / 100) * circumference;
 
-<Collapsible summary="What build server infrastructure does EAS Build use?">
+  const baseColor =
+    pct >= 200 ? C.cyan   :
+    pct >= 150 ? C.purple :
+    pct >= 100 ? C.gold   :
+    color;
 
-Android builds run on Linux runners hosted in Google Cloud Platform, and iOS builds run on macOS runners hosted in Expo's macOS cloud. See [Build server infrastructure](/build-reference/infrastructure/).
+  const holeSize = size - strokeWidth * 2;
 
-</Collapsible>
+  return (
+    <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}>
+      <Svg
+        width={size}
+        height={size}
+        style={{ position: "absolute", top: 0, left: 0 }}
+      >
+        {/* Rotate the entire group so arc starts at 12 o'clock */}
+        <G rotation="-90" origin={`${cx}, ${cy}`}>
 
-</FAQ>
+          {/* Track ring */}
+          <Circle
+            cx={cx}
+            cy={cy}
+            r={radius}
+            fill="none"
+            stroke={C.border}
+            strokeWidth={strokeWidth}
+          />
 
-## Get started
+          {/* Primary arc: 0–100% */}
+          {clampedPct > 0 && (
+            <Circle
+              cx={cx}
+              cy={cy}
+              r={radius}
+              fill="none"
+              stroke={baseColor}
+              strokeWidth={strokeWidth}
+              strokeDasharray={circumference}
+              strokeDashoffset={strokeDashoffset}
+              strokeLinecap="round"
+            />
+          )}
 
-<BoxLink
-  title="Create your first build"
-  description="It should only take a few minutes in total to get up and running for iOS and/or Android."
-  href="/build/setup"
-  Icon={Cube01Icon}
-/>
+          {/* Overflow arc: 100–200% rendered in gold */}
+          {pct > 100 && overPct > 0 && (
+            <Circle
+              cx={cx}
+              cy={cy}
+              r={radius}
+              fill="none"
+              stroke={C.gold}
+              strokeWidth={strokeWidth * 0.55}
+              strokeDasharray={circumference}
+              strokeDashoffset={overDashoffset}
+              strokeLinecap="round"
+              opacity={0.9}
+            />
+          )}
 
-<BoxLink
-  title="Share your apps with internal testers"
-  description="EAS Build can help share preview builds of your app with a single URL."
-  href="/build/internal-distribution"
-  Icon={Cube01Icon}
-/>
+          {/* Overflow arc: 200%+ rendered in cyan */}
+          {pct > 200 && over2Pct > 0 && (
+            <Circle
+              cx={cx}
+              cy={cy}
+              r={radius}
+              fill="none"
+              stroke={C.cyan}
+              strokeWidth={strokeWidth * 0.35}
+              strokeDasharray={circumference}
+              strokeDashoffset={over2Dashoffset}
+              strokeLinecap="round"
+              opacity={0.95}
+            />
+          )}
 
-<BoxLink
-  title="Automate submissions"
-  description="Learn how EAS Build can take your successful builds and handle uploading them to app stores automatically."
-  href="/build/automate-submissions"
-  Icon={Cube01Icon}
-/>
+        </G>
+      </Svg>
 
-<BoxLink
-  title="App version management"
-  description="Automate version bumps so you never have to think about them again."
-  href="/build-reference/app-versions"
-  Icon={Cube01Icon}
-/>
+      {/* Centered hole content */}
+      <View
+        style={{
+          width: holeSize,
+          height: holeSize,
+          borderRadius: holeSize / 2,
+          backgroundColor: "#110c00",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 2,
+        }}
+      >
+        {children}
+      </View>
+    </View>
+  );
+}
 
-<BoxLink
-  title="Run builds locally or on your own infrastructure"
-  description="EAS Build is a hosted service, and it can also run on your own machine, for example, to debug or to comply with company security policies."
-  href="/build-reference/local-builds"
-  Icon={Cube01Icon}
-/>
+// ── Delete Confirmation Modal ──────────────────────────────────────────────────
+function DeleteConfirmModal({ visible, onConfirm, onCancel, txLabel }) {
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
+      <View style={{ flex: 1, backgroundColor: "#000000cc", alignItems: "center", justifyContent: "center", padding: 30 }}>
+        <View style={{ backgroundColor: C.card, borderRadius: 20, padding: 24, width: "100%", borderWidth: 1, borderColor: C.border }}>
+          <View style={{ width: 52, height: 52, borderRadius: 26, backgroundColor: C.red + "22", alignItems: "center", justifyContent: "center", alignSelf: "center", marginBottom: 14 }}>
+            <Text style={{ fontSize: 24 }}>🗑️</Text>
+          </View>
+          <Text style={{ color: C.text, fontWeight: "800", fontSize: 16, textAlign: "center", marginBottom: 8 }}>ลบรายการนี้?</Text>
+          {txLabel ? <Text style={{ color: C.mutedLight, fontSize: 13, textAlign: "center", marginBottom: 20 }} numberOfLines={2}>{txLabel}</Text> : null}
+          <Text style={{ color: C.muted, fontSize: 12, textAlign: "center", marginBottom: 22 }}>การลบรายการจะย้อนกลับยอดบัญชีโดยอัตโนมัติ</Text>
+          <View style={{ flexDirection: "row", gap: 10 }}>
+            <TouchableOpacity onPress={onCancel} style={{ flex: 1, paddingVertical: 14, borderRadius: 12, borderWidth: 1.5, borderColor: C.border, alignItems: "center" }}>
+              <Text style={{ color: C.mutedLight, fontWeight: "700", fontSize: 14 }}>ยกเลิก</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={onConfirm} style={{ flex: 1, paddingVertical: 14, borderRadius: 12, backgroundColor: C.red, alignItems: "center" }}>
+              <Text style={{ color: "#fff", fontWeight: "800", fontSize: 14 }}>ลบรายการ</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
 
-<BoxLink
-  title="Limitations"
-  description="EAS Build is new and rapidly evolving, so we recommend getting familiar with the current limitations."
-  href="/build-reference/limitations"
-  Icon={Cube01Icon}
-/>
+// ── Edit Transaction Modal ─────────────────────────────────────────────────────
+function EditTxModal({ visible, tx, cats, onSave, onClose }) {
+  const allCats = [...cats.expense, ...cats.income];
+  const [amount, setAmount] = useState("");
+  const [note, setNote]     = useState("");
+  const [catId, setCatId]   = useState("");
+  const [date, setDate]     = useState(todayStr());
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
+
+  useEffect(() => {
+    if (visible && tx) {
+      setAmount(String(tx.amount || ""));
+      setNote(tx.note || "");
+      setCatId(tx.category || "");
+      setDate(tx.date || todayStr());
+    }
+  }, [visible, tx]);
+
+  if (!tx) return null;
+  const isExpense = cats.expense.some((c) => c.id === tx.category) || tx.kind === "expense";
+  const typeColor = isExpense ? C.red : C.accent;
+  const filteredCats = isExpense ? cats.expense : cats.income;
+
+  const handleSave = () => {
+    const amt = parseFloat(amount);
+    if (!amt || isNaN(amt)) return;
+    onSave({ ...tx, amount: amt, note, category: catId, date });
+    onClose();
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: "#000000bb", justifyContent: "flex-end" }}>
+        <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={onClose} />
+        <View style={{ backgroundColor: C.card, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingBottom: 40 }}>
+          <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: C.border, alignSelf: "center", marginTop: 12 }} />
+          <View style={{ paddingHorizontal: 20, paddingTop: 16, paddingBottom: 12, flexDirection: "row", alignItems: "center", borderBottomWidth: 1, borderBottomColor: C.border }}>
+            <View style={{ width: 44, height: 44, borderRadius: 14, backgroundColor: typeColor + "22", alignItems: "center", justifyContent: "center", marginRight: 12 }}>
+              <Text style={{ fontSize: 22 }}>{isExpense ? "💸" : "💚"}</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: C.mutedLight, fontSize: 11 }}>แก้ไขรายการ</Text>
+              <Text style={{ color: typeColor, fontSize: 17, fontWeight: "800" }}>{isExpense ? "รายจ่าย" : "รายรับ"}</Text>
+            </View>
+            <TouchableOpacity onPress={handleSave} style={{ backgroundColor: typeColor, borderRadius: 10, paddingHorizontal: 16, paddingVertical: 8 }}>
+              <Text style={{ color: "#0f1117", fontWeight: "800", fontSize: 13 }}>บันทึก</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView keyboardShouldPersistTaps="handle
